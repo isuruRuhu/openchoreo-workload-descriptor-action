@@ -1,0 +1,88 @@
+name: OpenChoreo Workload Descriptor Generator
+description: >-
+  Generate OpenChoreo workload.yaml descriptors from Choreo V2 .choreo/component.yaml files
+  and open a pull request, or verify existing descriptors are in sync (drift check).
+branding:
+  icon: git-pull-request
+  color: purple
+
+inputs:
+  mode:
+    description: >-
+      "generate" converts every .choreo/component.yaml and opens a PR with the resulting
+      workload.yaml files. "check" fails the run if any workload.yaml is missing or differs
+      from what the descriptor would generate (use on pull_request as a drift gate).
+    required: false
+    default: generate
+  enrichment-file:
+    description: >-
+      Optional path (in the repo) to an extraction-derived enrichment artifact — YAML keyed by
+      app path, merging `configurations` and `dependencies` into the generated descriptors.
+      Never place secrets in this file.
+    required: false
+    default: ""
+  pr-branch:
+    description: Branch the generated files are pushed to.
+    required: false
+    default: choreo/workload-descriptors
+  pr-title:
+    description: Pull request title.
+    required: false
+    default: Add OpenChoreo workload.yaml descriptors
+  token:
+    description: Token used to push the branch and open the PR.
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install PyYAML
+      shell: bash
+      run: python3 -m pip install --quiet --disable-pip-version-check pyyaml
+
+    - name: Drift check
+      if: inputs.mode == 'check'
+      shell: bash
+      run: |
+        ARGS=()
+        [ -n "${{ inputs.enrichment-file }}" ] && ARGS+=(--enrich "${{ inputs.enrichment-file }}")
+        python3 "${{ github.action_path }}/convert.py" --check "${ARGS[@]}" .
+
+    - name: Generate descriptors
+      if: inputs.mode == 'generate'
+      shell: bash
+      run: |
+        ARGS=()
+        [ -n "${{ inputs.enrichment-file }}" ] && ARGS+=(--enrich "${{ inputs.enrichment-file }}")
+        python3 "${{ github.action_path }}/convert.py" --write --force "${ARGS[@]}" .
+
+    - name: Open pull request
+      if: inputs.mode == 'generate'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        BRANCH: ${{ inputs.pr-branch }}
+        TITLE: ${{ inputs.pr-title }}
+      run: |
+        if [ -z "$(git status --porcelain -- '*workload.yaml')" ]; then
+          echo "No descriptor changes — nothing to do."
+          exit 0
+        fi
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        BASE=$(git rev-parse --abbrev-ref HEAD)
+        git checkout -B "$BRANCH"
+        git add -- '*workload.yaml'
+        git commit -m "$TITLE"
+        git push -f origin "$BRANCH"
+        if gh pr view "$BRANCH" --json state -q .state 2>/dev/null | grep -q OPEN; then
+          echo "PR already open for $BRANCH — branch updated."
+        else
+          gh pr create --base "$BASE" --head "$BRANCH" --title "$TITLE" --body \
+            "Generated OpenChoreo \`workload.yaml\` descriptors from the repo's Choreo V2 \`.choreo/component.yaml\` files.
+
+        These descriptors make OpenChoreo source builds durable (endpoints, visibility, and API schemas survive rebuilds) and surface schema-bearing endpoints in the OpenChoreo API catalog.
+
+        Review each file, then merge. Regenerate any time by re-running the workflow."
+        fi

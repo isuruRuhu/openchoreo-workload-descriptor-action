@@ -1,0 +1,19 @@
+# Copy to .github/workflows/generate-workload-descriptors.yml in your repository,
+# then run it from the Actions tab (Run workflow). It opens a PR with the generated
+# workload.yaml files — review and merge.
+name: Generate OpenChoreo workload descriptors
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: isuruRuhu/openchoreo-workload-descriptor-action@v1
