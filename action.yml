@@ -1,7 +1,6 @@
 name: OpenChoreo Workload Descriptor Generator
 description: >-
-  Generate OpenChoreo workload.yaml descriptors from Choreo V2 .choreo/component.yaml files
-  and open a pull request, or verify existing descriptors are in sync (drift check).
+  Convert Choreo V2 component.yaml files to OpenChoreo workload.yaml descriptors via PR, with a CI drift-check mode.
 branding:
   icon: git-pull-request
   color: purple
