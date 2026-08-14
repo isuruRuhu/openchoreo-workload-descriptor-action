@@ -14,8 +14,12 @@ with an OpenAPI file) appear automatically in the OpenChoreo API catalog.
 
 1. Copy `examples/generate-workload-descriptors.yml` into `.github/workflows/` on your default
    branch.
-2. Actions tab → *Generate OpenChoreo workload descriptors* → **Run workflow**.
-3. Review and merge the PR it opens (branch `choreo/workload-descriptors`).
+2. Allow workflows to open pull requests (off by default): repo **Settings → Actions →
+   General → Workflow permissions** → select *Read and write permissions* and tick
+   *Allow GitHub Actions to create and approve pull requests*. Equivalent CLI:
+   `gh api -X PUT repos/OWNER/REPO/actions/permissions/workflow -f default_workflow_permissions=write -F can_approve_pull_request_reviews=true`
+3. Actions tab → *Generate OpenChoreo workload descriptors* → **Run workflow**.
+4. Review and merge the PR it opens (branch `choreo/workload-descriptors`).
 
 Optionally also add `examples/workload-descriptor-drift-check.yml` — it fails any PR where
 `workload.yaml` has drifted from `.choreo/component.yaml` during the transition window.
