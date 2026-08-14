@@ -24,6 +24,17 @@ with an OpenAPI file) appear automatically in the OpenChoreo API catalog.
 Optionally also add `examples/workload-descriptor-drift-check.yml` — it fails any PR where
 `workload.yaml` has drifted from `.choreo/component.yaml` during the transition window.
 
+## Action repo visibility (verified behavior)
+
+- **Public action repo**: usable from any repository anywhere (Marketplace listing optional —
+  it adds discoverability only, and can be delisted at any time without breaking consumers).
+- **Private action repo**: usable only from *private* repositories of the same owner/org, and
+  only with Settings → Actions → Access set to share; **public repos cannot resolve it**
+  (`Unable to resolve action ... not found`), and Marketplace publishing is not possible.
+- Never delete or privatize the action repo once external consumers reference it — that breaks
+  their workflows at the next run. To retire it, archive the repo (workflows keep working) and
+  add a deprecation notice.
+
 ## What gets converted
 
 | V2 `component.yaml` | OC `workload.yaml` |
