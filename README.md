@@ -24,6 +24,26 @@ with an OpenAPI file) appear automatically in the OpenChoreo API catalog.
 Optionally also add `examples/workload-descriptor-drift-check.yml` — it fails any PR where
 `workload.yaml` has drifted from `.choreo/component.yaml` during the transition window.
 
+> **Note:** the auto-generated "Installation" snippet on the Marketplace page is a single *step*,
+> not a complete workflow — pasting it into an empty file fails with "A sequence was not
+> expected". Use the complete example below (or the files in `examples/`) instead; the
+> Marketplace snippet is only for adding this action to a workflow you already have.
+>
+> ```yaml
+> name: Generate OpenChoreo workload descriptors
+> on:
+>   workflow_dispatch:
+> permissions:
+>   contents: write
+>   pull-requests: write
+> jobs:
+>   generate:
+>     runs-on: ubuntu-latest
+>     steps:
+>       - uses: actions/checkout@v4
+>       - uses: isuruRuhu/openchoreo-workload-descriptor-action@v1
+> ```
+
 ## Action repo visibility (verified behavior)
 
 - **Public action repo**: usable from any repository anywhere (Marketplace listing optional —
