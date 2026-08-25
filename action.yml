@@ -16,7 +16,9 @@ inputs:
   enrichment-file:
     description: >-
       Optional path (in the repo) to an extraction-derived enrichment artifact — YAML keyed by
-      app path, merging `configurations` and `dependencies` into the generated descriptors.
+      app path, merging `name`, `endpoints`, `configurations` and `dependencies` into the
+      generated descriptors. Entries for app paths that have no .choreo/component.yaml
+      (components configured in the Choreo console) produce a workload.yaml on their own.
       Never place secrets in this file.
     required: false
     default: ""

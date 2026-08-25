@@ -81,7 +81,7 @@ app path (monorepos supported).
 | Input | Default | Purpose |
 |---|---|---|
 | `mode` | `generate` | `generate` opens a PR; `check` fails on drift (CI gate) |
-| `enrichment-file` | – | path to a migration-provided YAML artifact merging `configurations` (non-secret env) and `dependencies` per app path |
+| `enrichment-file` | – | path to a migration-provided YAML artifact keyed by app path; merges `name`, `endpoints`, `configurations` (non-secret env) and `dependencies`. For components with no `.choreo/component.yaml` the artifact is the endpoint source |
 | `pr-branch` | `choreo/workload-descriptors` | branch used for the PR |
 | `pr-title` | `Add OpenChoreo workload.yaml descriptors` | commit + PR title |
 | `token` | `github.token` | token for pushing the branch and opening the PR |
@@ -89,13 +89,32 @@ app path (monorepos supported).
 ## Enrichment artifact
 
 Your migration engineer may hand you a small YAML file with per-component settings recovered
-from Choreo V2 (non-secret environment variables, service-to-service connections). Commit it
-anywhere in the repo and pass its path as `enrichment-file`; the generated descriptors absorb
-it. Do not place secrets in this file.
+from Choreo V2 (endpoint definitions, non-secret environment variables, service-to-service
+connections). Commit it anywhere in the repo and pass its path as `enrichment-file`; the
+generated descriptors absorb it. Do not place secrets in this file.
+
+Keys are app paths relative to the repo root (`.` for the root). Mergeable keys per entry:
+`name` (descriptor `metadata.name`), `endpoints`, `configurations`, `dependencies`.
+
+**Components created in the Choreo console without a `.choreo/component.yaml`** keep their
+endpoint configuration only in Choreo's own store, so there is nothing in the repo to convert.
+For those, the artifact *is* the source: an entry whose app path has no descriptor still
+produces a `workload.yaml` (the directory must exist). Where both exist, artifact `endpoints`
+override the descriptor's. The migration engineer generates the artifact from the Choreo V2
+extraction on their side — your CI never needs Choreo credentials.
 
 ```yaml
 # enrichment.yaml — keys are app paths relative to the repo root
-inventory-service:
+apps/inventory/backend:                # no .choreo/component.yaml here — artifact is the source
+  name: inventory-service
+  endpoints:
+    - name: endpoint-9090
+      displayName: Endpoint 9090
+      port: 9090
+      type: HTTP
+      basePath: /
+      visibility: [external]
+inventory-service:                     # has a .choreo/component.yaml — artifact enriches it
   configurations:
     env:
       - name: LOG_LEVEL

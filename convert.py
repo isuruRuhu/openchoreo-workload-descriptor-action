@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Generate OpenChoreo workload.yaml descriptors from Choreo V2 .choreo/component.yaml files.
+"""Generate OpenChoreo workload.yaml descriptors from Choreo V2 .choreo/component.yaml files
+and/or a migration-provided enrichment artifact.
 
 Scans one or more repo checkouts for V2 component descriptors and emits an OC
 workload descriptor (openchoreo.dev/v1alpha1) at each app path root — the file
@@ -35,6 +36,14 @@ Usage:
 
 Enrichment artifact format (keys are app paths relative to the repo root; '.' for root):
   inventory-service:
+    name: inventory-service          # optional: descriptor metadata.name (default: dir name)
+    endpoints:                       # optional: OC-form endpoints (from V2 extraction)
+      - name: endpoint-9090
+        displayName: Endpoint 9090
+        port: 9090
+        type: HTTP
+        basePath: /
+        visibility: [external]
     configurations:
       env:
         - name: LOG_LEVEL
@@ -46,8 +55,12 @@ Enrichment artifact format (keys are app paths relative to the repo root; '.' fo
           visibility: project
           envBindings:
             address: METADATA_SVC_URL
-Only `configurations` and `dependencies` are merged (whole-key replace); endpoints always come
-from the V2 descriptor. Secrets must NOT be placed in the artifact — they stay cluster-side.
+Mergeable keys: `name`, `endpoints`, `configurations`, `dependencies` (whole-key replace).
+Components created in the Choreo V2 console WITHOUT a .choreo/component.yaml have their
+endpoint configuration only in V2's store; for those, the artifact IS the source: an artifact
+entry whose app path has no V2 descriptor still produces a workload.yaml (the directory must
+exist in the repo). When both exist, artifact `endpoints` override the descriptor's (warned).
+Secrets must NOT be placed in the artifact — they stay cluster-side.
 
 Legacy .choreo/endpoints.yaml descriptors are also handled.
 """
@@ -80,10 +93,19 @@ NO_EXTERNAL_ROUTE_TYPES = {"gRPC", "TCP", "UDP"}
 
 DESCRIPTOR_NAMES = ("component.yaml", "component.yml", "endpoints.yaml", "endpoints.yml")
 
+ENRICHMENT_KEYS = ("name", "endpoints", "configurations", "dependencies")
+
 HEADER = """\
 # OpenChoreo Workload Descriptor
 # Generated from .choreo/{src} by scripts/component_yaml_to_workload.py
 # (Choreo V2 -> OpenChoreo migration). Review before committing.
+"""
+
+HEADER_ARTIFACT = """\
+# OpenChoreo Workload Descriptor
+# Generated from the migration enrichment artifact (Choreo V2 component endpoints
+# extracted from the V2 store; this component has no .choreo/component.yaml)
+# by scripts/component_yaml_to_workload.py. Review before committing.
 """
 
 
@@ -146,6 +168,57 @@ def convert_endpoint(ep: dict, app_dir: Path, warnings: list) -> dict:
     return out
 
 
+def check_artifact_endpoints(endpoints, app_dir: Path, warnings: list) -> list:
+    """Validate OC-form endpoints supplied by the enrichment artifact (already converted)."""
+    if not isinstance(endpoints, list):
+        warnings.append("enrichment 'endpoints' is not a list; ignored")
+        return []
+    out = []
+    for ep in endpoints:
+        if not isinstance(ep, dict) or not ep.get("name"):
+            warnings.append(f"enrichment endpoint without a name skipped: {ep!r}")
+            continue
+        if ep.get("port") is None:
+            warnings.append(f"enrichment endpoint '{ep['name']}': no port declared")
+        if ep.get("type") in NO_EXTERNAL_ROUTE_TYPES and "external" in (ep.get("visibility") or []):
+            warnings.append(
+                f"endpoint '{ep['name']}': type {ep['type']} gets no external Route from the "
+                f"service CT (F29) despite external visibility"
+            )
+        schema_path = ep.get("schemaFile")
+        if schema_path and not (app_dir / schema_path).is_file():
+            warnings.append(
+                f"endpoint '{ep['name']}': schemaFile '{schema_path}' not found under {app_dir}"
+            )
+        out.append(ep)
+    return out
+
+
+def apply_enrichment(workload: dict, enrichment: dict, app_dir: Path, warnings: list):
+    if "name" in enrichment:
+        workload["metadata"]["name"] = k8s_name(str(enrichment["name"]))
+    if "endpoints" in enrichment:
+        if workload.get("endpoints"):
+            warnings.append("endpoints from the V2 descriptor overridden by the enrichment artifact")
+        eps = check_artifact_endpoints(enrichment["endpoints"], app_dir, warnings)
+        if eps:
+            workload["endpoints"] = eps
+    for key in ("configurations", "dependencies"):
+        if key in enrichment:
+            workload[key] = enrichment[key]
+    unknown = set(enrichment) - set(ENRICHMENT_KEYS)
+    if unknown:
+        warnings.append(f"enrichment keys ignored (not mergeable): {sorted(unknown)}")
+
+
+def order_workload(workload: dict) -> dict:
+    ordered = {"apiVersion": workload["apiVersion"], "metadata": workload["metadata"]}
+    for key in ("endpoints", "configurations", "dependencies"):
+        if key in workload:
+            ordered[key] = workload[key]
+    return ordered
+
+
 def convert_descriptor(desc: dict, app_dir: Path, src_name: str, enrichment: dict | None = None):
     """Returns (workload_dict, warnings)."""
     warnings = []
@@ -160,7 +233,7 @@ def convert_descriptor(desc: dict, app_dir: Path, src_name: str, enrichment: dic
     }
     if endpoints:
         workload["endpoints"] = [convert_endpoint(e, app_dir, warnings) for e in endpoints]
-    else:
+    elif not (enrichment and enrichment.get("endpoints")):
         warnings.append("no endpoints declared in V2 descriptor (fine for tasks/workers)")
 
     deps = desc.get("dependencies") or {}
@@ -176,14 +249,22 @@ def convert_descriptor(desc: dict, app_dir: Path, src_name: str, enrichment: dic
         warnings.append("V2 'configuration(s)' block present — review manually")
 
     if enrichment:
-        for key in ("configurations", "dependencies"):
-            if key in enrichment:
-                workload[key] = enrichment[key]
-        unknown = set(enrichment) - {"configurations", "dependencies"}
-        if unknown:
-            warnings.append(f"enrichment keys ignored (not mergeable): {sorted(unknown)}")
+        apply_enrichment(workload, enrichment, app_dir, warnings)
 
-    return workload, warnings
+    return order_workload(workload), warnings
+
+
+def synthesize_from_artifact(app_dir: Path, enrichment: dict):
+    """Build a descriptor for an app path that has NO V2 descriptor — the artifact is the source."""
+    warnings = []
+    workload = {
+        "apiVersion": "openchoreo.dev/v1alpha1",
+        "metadata": {"name": k8s_name(app_dir.name)},
+    }
+    apply_enrichment(workload, enrichment, app_dir, warnings)
+    if not workload.get("endpoints"):
+        warnings.append("artifact entry declares no endpoints (fine for tasks/workers)")
+    return order_workload(workload), warnings
 
 
 def find_descriptors(repo_dir: Path):
@@ -197,6 +278,10 @@ def find_descriptors(repo_dir: Path):
                 break
 
 
+def render(workload: dict, header: str) -> str:
+    return header + yaml.safe_dump(workload, sort_keys=False, default_flow_style=False)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("repos", nargs="+", type=Path, help="repo checkout directories")
@@ -205,7 +290,8 @@ def main():
     ap.add_argument("--check", action="store_true",
                     help="drift check: exit 1 if any workload.yaml is missing or differs")
     ap.add_argument("--enrich", type=Path, default=None,
-                    help="YAML enrichment artifact keyed by app path (configurations/dependencies)")
+                    help="YAML enrichment artifact keyed by app path "
+                         "(name/endpoints/configurations/dependencies)")
     args = ap.parse_args()
 
     if args.check and (args.write or args.force):
@@ -217,76 +303,99 @@ def main():
         if not isinstance(enrichment_map, dict):
             ap.error(f"enrichment file {args.enrich} must be a YAML mapping keyed by app path")
 
-    exit_code = 0
-    generated = 0
-    drift = 0
+    state = {"exit_code": 0, "generated": 0, "drift": 0}
+
+    def emit(label: str, app_dir: Path, body: str, workload: dict, warnings: list, source: str):
+        target = app_dir / "workload.yaml"
+        print(f"== {label}  ({source})")
+        n_eps = len(workload.get("endpoints", []))
+        mode = "(check)" if args.check else (target if args.write else "(dry run)")
+        print(f"  endpoints: {n_eps}  ->  {mode}")
+        for w in warnings:
+            print(f"  WARN: {w}")
+
+        if args.check:
+            if not target.exists():
+                print("  DRIFT: workload.yaml missing")
+                state["drift"] += 1
+            elif target.read_text() != body:
+                print("  DRIFT: workload.yaml differs from generated content")
+                state["drift"] += 1
+            else:
+                print("  in sync")
+            return
+
+        if args.write:
+            if target.exists() and not args.force:
+                existing = target.read_text()
+                if existing == body:
+                    print("  unchanged (already up to date)")
+                else:
+                    print("  SKIP: workload.yaml exists and differs (use --force)")
+                    state["exit_code"] = 1
+                return
+            target.write_text(body)
+            state["generated"] += 1
+        else:
+            print("  --- generated content ---")
+            for line in body.splitlines():
+                print(f"  | {line}")
+
     for repo in args.repos:
         if not repo.is_dir():
             print(f"ERROR: {repo} is not a directory", file=sys.stderr)
-            exit_code = 1
+            state["exit_code"] = 1
             continue
         found = False
+        seen_paths = set()
         for desc_file in find_descriptors(repo):
             found = True
             app_dir = desc_file.parent.parent
-            rel = app_dir.relative_to(repo)
-            label = f"{repo.name}/{rel}" if str(rel) != "." else repo.name
+            rel = str(app_dir.relative_to(repo))
+            seen_paths.add(rel)
+            label = f"{repo.name}/{rel}" if rel != "." else repo.name
             try:
                 desc = yaml.safe_load(desc_file.read_text()) or {}
             except yaml.YAMLError as e:
                 print(f"== {label}\n  ERROR: cannot parse {desc_file.name}: {e}")
-                exit_code = 1
+                state["exit_code"] = 1
                 continue
 
-            enrichment = enrichment_map.get(str(rel))
+            enrichment = enrichment_map.get(rel)
             workload, warnings = convert_descriptor(desc, app_dir, desc_file.name, enrichment)
-            target = app_dir / "workload.yaml"
-            body = HEADER.format(src=desc_file.name) + yaml.safe_dump(
-                workload, sort_keys=False, default_flow_style=False
-            )
+            body = render(workload, HEADER.format(src=desc_file.name))
+            source = f".choreo/{desc_file.name}, schemaVersion {desc.get('schemaVersion', '?')}"
+            if enrichment:
+                source += " + enrichment"
+            emit(label, app_dir, body, workload, warnings, source)
 
-            print(f"== {label}  (schemaVersion {desc.get('schemaVersion', '?')})")
-            n_eps = len(workload.get("endpoints", []))
-            mode = "(check)" if args.check else (target if args.write else "(dry run)")
-            print(f"  endpoints: {n_eps}  ->  {mode}")
-            for w in warnings:
-                print(f"  WARN: {w}")
-
-            if args.check:
-                if not target.exists():
-                    print("  DRIFT: workload.yaml missing")
-                    drift += 1
-                elif target.read_text() != body:
-                    print("  DRIFT: workload.yaml differs from generated content")
-                    drift += 1
-                else:
-                    print("  in sync")
+        # Artifact-only entries: app paths with no V2 descriptor — the artifact is the source.
+        for rel, enrichment in enrichment_map.items():
+            rel = str(rel)
+            if rel in seen_paths or not isinstance(enrichment, dict):
                 continue
+            app_dir = (repo / rel).resolve() if rel != "." else repo.resolve()
+            label = f"{repo.name}/{rel}" if rel != "." else repo.name
+            if not app_dir.is_dir():
+                print(f"== {label}\n  ERROR: enrichment app path does not exist in the repo")
+                state["exit_code"] = 1
+                if args.check:
+                    state["drift"] += 1
+                continue
+            found = True
+            workload, warnings = synthesize_from_artifact(app_dir, enrichment)
+            body = render(workload, HEADER_ARTIFACT)
+            emit(label, app_dir, body, workload, warnings, "enrichment artifact only — no .choreo descriptor")
 
-            if args.write:
-                if target.exists() and not args.force:
-                    existing = target.read_text()
-                    if existing == body:
-                        print("  unchanged (already up to date)")
-                    else:
-                        print("  SKIP: workload.yaml exists and differs (use --force)")
-                        exit_code = 1
-                    continue
-                target.write_text(body)
-                generated += 1
-            else:
-                print("  --- generated content ---")
-                for line in body.splitlines():
-                    print(f"  | {line}")
         if not found:
             print(f"== {repo.name}\n  WARN: no .choreo descriptors found")
 
     if args.check:
-        print(f"\n{drift} file(s) out of sync")
-        return 1 if drift else exit_code
+        print(f"\n{state['drift']} file(s) out of sync")
+        return 1 if state["drift"] else state["exit_code"]
     if args.write:
-        print(f"\n{generated} workload.yaml file(s) written")
-    return exit_code
+        print(f"\n{state['generated']} workload.yaml file(s) written")
+    return state["exit_code"]
 
 
 if __name__ == "__main__":
