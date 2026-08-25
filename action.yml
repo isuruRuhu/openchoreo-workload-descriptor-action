@@ -63,6 +63,8 @@ runs:
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
+        # Pin gh to the repo the workflow runs in — on a fork, gh would otherwise target the parent.
+        GH_REPO: ${{ github.repository }}
         BRANCH: ${{ inputs.pr-branch }}
         TITLE: ${{ inputs.pr-title }}
       run: |
